@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Мои загрузки · Дашборд ректора ИУБиП</title>
+  <link rel="icon" type="image/svg+xml" href="img/iubip-logo.svg" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="brand">
+        <img class="brand-logo" src="img/iubip-logo.svg" alt="Логотип Южного университета (ИУБиП)" />
+        <div class="brand-text">
+          <strong>Дашборд ректора</strong>
+          <span>ЧОУ ВО «Южный университет (ИУБиП)» · Мои загрузки</span>
+        </div>
+      </div>
+      <div class="header-controls">
+        <a href="/dashboard.html" class="btn btn-outline">← К ленте показателей</a>
+        <a href="upload.html" class="btn btn-outline">Загрузить ещё</a>
+        <button id="btnLogout" class="btn btn-outline" hidden>Выйти</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="app-main" style="max-width: 1200px">
+    <div class="page-head">
+      <div>
+        <h1>Мои загрузки</h1>
+        <p class="sub">Список файлов, загруженных вашим подразделением, со статусом свежести.
+        «Просрочено» означает, что по выбранной частоте данные следовало обновить уже.</p>
+      </div>
+    </div>
+
+    <div id="msg" class="muted" style="margin-bottom:10px"></div>
+
+    <!-- Без входа список недоступен: раньше страница показывала пустую
+         таблицу с ошибкой и кнопку «Выйти», выйти не из чего. -->
+    <div id="authHint" class="section-card" style="display:none">
+      <div class="card-head"><h3>Войдите подразделением</h3></div>
+      <p class="muted" style="font-size:13px">Список файлов виден после входа — так
+      подразделение видит только свои загрузки. Логин и пароль выдаёт администратор.</p>
+      <div class="page-actions" style="margin-top:12px">
+        <a href="/" class="btn btn-primary">Войти на главной →</a>
+        <a href="/upload.html" class="btn btn-outline">Страница загрузки</a>
+      </div>
+    </div>
+
+    <div class="table-wrap" id="uploadsTableWrap">
+      <table class="data">
+        <thead>
+          <tr>
+            <th>Файл</th><th>Название</th><th>Подразделение</th><th>Период</th>
+            <th>Загружено</th><th>Обновлять</th><th>Статус</th><th>Доступ</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="uploadsTbody"></tbody>
+      </table>
+    </div>
+  </main>
+
+  <script>
+    (function () {
+      "use strict";
+      var tbody = document.getElementById("uploadsTbody");
+      var msg = document.getElementById("msg");
+      var btnLogout = document.getElementById("btnLogout");
+
+      btnLogout.addEventListener("click", async function () {
+        await fetch("/api/logout", { method: "POST" });
+        location.reload();
+      });
+
+      async function load() {
+        try {
+          var res = await fetch("/api/uploads");
+          if (res.status === 401) {
+            document.getElementById("authHint").style.display = "block";
+            document.getElementById("uploadsTableWrap").style.display = "none";
+            msg.textContent = "";
+            return;
+          }
+          if (!res.ok) { msg.textContent = "Не удалось загрузить список"; return; }
+          document.getElementById("btnLogout").hidden = false;
+          var data = await res.json();
+          render(data.uploads || []);
+        } catch (e) { msg.textContent = "Ошибка связи с сервером"; }
+      }
+
+      function esc(s) { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+
+      // Уровни доступа — те же слова, что на форме загрузки: сырой
+      // open/internal/confidential из базы человек не читает.
+      var ACCESS = { open: "Открыто", internal: "Служебное", confidential: "Конфиденциальное" };
+
+      // Статус приёма: файл принят и лежит в очереди на проверку (needs_review),
+      // опубликован, отклонён или не принят вовсе. Цветом — те же токены,
+      // что и в статусах свежести ниже.
+      var STATUS = {
+        needs_review: ["Ждёт проверки", "var(--yellow)", "rgba(229,176,42,.20)"],
+        accepted:     ["Опубликовано",  "var(--green)",  "rgba(15,122,56,.14)"],
+        rejected:     ["Отклонено",     "var(--muted)",  "var(--surface-2)"],
+        failed:       ["Ошибка",        "var(--red)",    "rgba(200,16,46,.13)"],
+        ok:           ["Принято",       "var(--green)",  "rgba(15,122,56,.14)"]
+      };
+      // 'ok' — загрузки, сделанные до перехода на новый конвейер: у них
+      // разбора и проверок нет, но карточку посмотреть всё равно можно.
+      var REVIEWABLE = { needs_review: 1, accepted: 1, rejected: 1, ok: 1 };
+
+      function statusCell(u) {
+        var s = STATUS[u.status];
+        var pill = s
+          ? "<span class='status-pill' style='background:" + s[2] + ";color:" + s[1] + "'>" +
+            s[0] + "</span>"
+          : "<span class='muted'>" + esc(u.status || "—") + "</span>";
+        // Сколько проверок висит на загрузке: предупреждения — жёлтые,
+        // блокирующие ошибки — красные. Пустые счётчики не показываем.
+        var badges = [];
+        if (u.warnings) badges.push("<span style='color:var(--yellow);font-weight:700'>⚠ " + u.warnings + "</span>");
+        if (u.errors) badges.push("<span style='color:var(--red);font-weight:700'>✖ " + u.errors + "</span>");
+        return pill + (badges.length
+          ? " <span style='font-size:12px;white-space:nowrap'>" + badges.join(" / ") + "</span>"
+          : "");
+      }
+
+      function render(list) {
+        tbody.innerHTML = "";
+        if (!list.length) {
+          tbody.innerHTML = "<tr><td colspan='9' class='muted'>Загрузок пока нет. Начните со страницы загрузки.</td></tr>";
+          return;
+        }
+        list.forEach(function (u) {
+          var freshClass = u.freshness === "overdue" ? "overdue" : "ok";
+          var freshLabel = u.freshness === "overdue" ? "ПРОСРОЧЕНО" : "актуально";
+          var canOpen = !!REVIEWABLE[u.status];
+          var tr = document.createElement("tr");
+          tr.innerHTML =
+            "<td>" + esc(u.original_name || u.filename) + "</td>" +
+            "<td>" + esc(u.title || u.original_name || u.filename) + "</td>" +
+            "<td>" + esc(u.division_title || u.division_id) + "</td>" +
+            "<td>" + esc(u.period || "—") + "</td>" +
+            "<td><span class='muted' style='font-size:12px'>" + esc(u.uploaded_at || "") + "</span></td>" +
+            "<td><span class='" + freshClass + "'>" + freshLabel + "</span>" +
+            (u.next_expected ? " · до " + esc(u.next_expected) : "") + "</td>" +
+            "<td style='white-space:nowrap'>" + statusCell(u) + "</td>" +
+            "<td>" + esc(ACCESS[u.access_level] || u.access_level || "Открыто") + "</td>" +
+            "<td style='white-space:nowrap'>" +
+            (canOpen
+              ? "<a class='btn btn-ghost btn-small' style='display:inline-block' href='review.html?id=" +
+                encodeURIComponent(u.upload_id) + "'>Открыть</a> "
+              : "") +
+            "<button class='btn btn-ghost btn-small detail-btn'>Детали</button></td>";
+          tbody.appendChild(tr);
+
+          // Строка деталей: то, что подразделение указало в анкете —
+          // зачем данные, кто отвечает, как часто обновлять.
+          var det = document.createElement("tr");
+          det.hidden = true;
+          det.innerHTML =
+            "<td colspan='9' class='muted' style='font-size:12.5px;padding:8px 12px;background:var(--surface-2)'>" +
+            "<b>Зачем:</b> " + esc(u.purpose || "—") +
+            " · <b>Ответственный:</b> " + esc(u.responsible || "—") +
+            " · <b>Частота:</b> " + esc(u.frequency || "разово") +
+            " · <b>Числа подтверждены:</b> " + (u.confirmed ? "да" : "нет") +
+            "</td>";
+          tbody.appendChild(det);
+          tr.querySelector(".detail-btn").addEventListener("click", function () {
+            det.hidden = !det.hidden;
+          });
+        });
+      }
+
+      // Классы для статуса свежести
+      var style = document.createElement("style");
+      style.textContent = ".overdue { color: var(--red); font-weight: 600; } .ok { color: var(--green); }";
+      document.head.appendChild(style);
+
+      load();
+    })();
+  </script>
+</body>
+</html>
+
